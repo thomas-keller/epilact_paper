@@ -1,0 +1,862 @@
+---
+title: "epilact_comfirm_val"
+output: html_notebook
+---
+
+This is to backdate confirm the validation results from November 19 (110719), where we removed 24 samples from the initial sequencing and the 0 timepoint (delivery).
+
+Probably to keep things the same (the OG results didn't remove 0) I'll remove 0?
+
+I think that that's a lot of DE genes...basically should the baseline be at birth or first visit after?
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,error=TRUE ) #this just takes so freaking long need to find the errors first, should add this to Derek's 
+source('Rsource/epilact_functions.R')
+options('mc.cores'=6)
+#I needed to update pandoc to get this to knit once
+#installr::install.pandoc()
+```
+
+This document is a progress report that removes the 24 initial samples and compares the latter samples as validation.
+
+It's a mix of Mcsea and Dmcat.
+
+
+The visits to remove are 5,6,7 (no need to use the excel file)
+LOL update after talking to Adetola- taking the shortcut totally did me wrong (the right way it to filter on sample name + visit)
+
+slowly converting folder structure over to mimic what Jenna had from the microbiome workshop, I rather liked that.
+
+TODO -- add in the dmrcat for the proper overlap, that's probably what's breaking later on
+update - this is in
+last todo - add in ancestor , run through chunk by chunk
+some missing (broken or 0 size?)
+
+11-16 
+added chunk names, super helpful because this runs so long
+
+# key beginning Preprocessing!
+
+The key to methylation is the preprocessing. Methylation chips are super biased and weird. There was basically a butique field of statistics built to correct this weird methylation arrays (first the 37k, then 450k, and now 850k (all supersets of the previous positions)).
+
+Basically, the methylation distribution should be a smooth bimodal distribution...The uncorrected raw data will show peaks in roughly the right areas, but with varying intensities. After preprocessing (there are several, here we use Noob- one of the more commonly use correction methods) which after processing shows the peaks clumped more or less together. There's a qc report to support that.
+
+Then, we estimate blood cell proportions, these are a BIG thing in methylation, and you basically always need to take them into account if using blood. It's a one function call & adds 5-6 extra columns. Based on discussions with Monica, in practice it's best to drop one/2 (probably the one with the lowest consistent proportion) so you don't run into linearity issues (it's calculated from regression and adds up to 1, theoretically)
+
+```{r setupqc}
+targets<-read.metharray.sheet('Rinput/epilact_idat',pattern="Sample_Sheet_wm")
+nrow(targets)
+#There are some samples (24) to remove from later analyses
+toremove<-xlsx::read.xlsx('Rinput/EPILACT_de-identified_database_11-24_exclude_stress.xlsx',sheetIndex=1,password="maureeng")
+
+
+
+#from email, exlude visits from 5-7 (Visit Used)
+#leaving in to laugh at myself
+
+targetstm= targets %>% filter(!(tpclean %in% c(0)))
+targetstm2=targetstm
+#what's a better way?
+#all I can think is to exhaustively loop through,
+# %in% won't work, right?
+nrow(targets)
+RGset <- read.metharray.exp(targets = targetstm2)
+
+
+#read in the data
+#RGset <- read.metharray.exp(targets = targetstm)
+#do some quantile normalization (I already took out the one bad array from previous QC rounds)
+Mset<-preprocessNoob(RGset)
+getQC(Mset)
+qcReport(RGset,pdf="Rfigures_rem0/qcReport_Adetola_midremoved.pdf")
+Rset <- ratioConvert(Mset, what = "both", keepCN = TRUE)
+beta <- getBeta(Rset)
+
+#map to genome
+GRset <- mapToGenome(Rset)
+
+sampleNames <- sampleNames(GRset)
+probeNames <- featureNames(GRset)
+pheno <- pData(GRset)
+phenoData <- pData(RGset)
+#library(CpGassoc)
+
+
+#OK, some plots within minfi
+#phenoData is coming from the RGset, pheno from the genomic ranges
+densityPlot(Mset, sampGroups = phenoData$Sample_Group)
+densityBeanPlot(Mset, sampGroups = phenoData$Sample_Group)
+
+cellCounts <- estimateCellCounts2(RGset)
+```
+
+# more interesting stuff
+
+why do we do this?
+
+continue from early parts
+
+set up the phenotype
+perform combat
+
+initial qc filter...
+
+gotta remove smps (single methylation polymorphisms) that overlap SNPs (single nucleotide polymorphisms)
+
+also, some cross-reactive probes (mostly from X chr from the older 450k (that is a subset of the 850k))
+
+```{r qcfilter}
+
+phenocell=cbind(pheno,cellCounts$counts)
+phenocellrd <- phenocell[,c(2:9,11,12,15:20)] # remove index, file name and redundant barcode stuff
+phenocellrd$Gravida<-factor(phenocellrd$Gravida)
+phenocellrd$Race <- factor(phenocellrd$Race)
+phenocellrd$Para <-factor(phenocellrd$Para)
+phenocellrd$tpnum<-as.numeric(phenocellrd$tpclean)
+phenocellrd$Slide <- as.factor(phenocellrd$Slide)
+phenocellrd$Array <- as.factor(phenocellrd$Array)
+phenocellrd$tpclean<-factor(phenocellrd$tpclean,levels=sort(unique(phenocellrd$tpclean)))
+
+mval<-getM(GRset)
+mod<-model.matrix(~as.factor(Sample_Group)+as.factor(tpclean),data=phenocellrd)
+#combat_beta<-ComBat(dat=mval,batch=phenocellrd$Array, mod=mod) 
+modcombat1<-model.matrix(~Sample_Group, data=phenocellrd)
+combat_beta<-ComBat(dat=mval,batch=phenocellrd$Slide,mod=modcombat1)
+#combat_mval=combat_beta #wasn't actually beta before
+
+#epanor=getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+#epanor=getLocations(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+#simple as intersect(epanor,full.ranges)
+epano=getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+epanol=getLocations(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+data("dmrcatedata")
+mvalsf <- rmSNPandCH(combat_beta,dist=2,mafcut=.05)
+#mvalsfc <-rmSNPandCH(combat_beta,dist=2,mafcut=.05)
+
+#beta_sub = rmSNPandCH(nval,dist=2,mafcut=.05)
+
+
+#corrplot(phenocellrd[,c(11,12,13,14,15,16)])
+df=as.data.frame(phenocellrd)
+m=cor(df[,c(11,12,14,15,16)])
+corrplot(m)
+
+indiv <-factor(pheno$Individual)
+sgr <- factor(pheno$Sample_Group) #might need to fix it so the base is feeding?
+tpt <- factor(pheno$tpclean)
+
+phenocellrd$Gravida<-factor(phenocellrd$Gravida)
+phenocellrd$Race <- factor(phenocellrd$Race)
+phenocellrd$Para <-factor(phenocellrd$Para)
+```
+
+# model setup and estimation
+
+Here we are comparing two main models to understand epigenetic changes in the mother postpartum. 
+Indendent variable
+Feeding (breastfeeding/formula) ~stuff
+time( visit) ~stuff
+
+
+```{r dmrcate}
+mod8 <-model.matrix(~Sample_Group+tpclean+Race+Para+Array+Slide+CD8T+CD4T+Bcell+Mono,data=phenocellrd)
+mod9<-model.matrix(~tpnum+Sample_Group+Race+Para+Array+Slide+CD8T+CD4T+Bcell+Mono,data=phenocellrd)
+
+
+####
+#somehow transplant this ancestral snp logic
+#main todo is how to figure out SNP position from DMRcate DMRs 
+#(just need to dive into the annotation)
+
+#I guess just run on the
+
+#env comes for dmrdata I think
+data(dmrcatedata)
+
+testdist=lapply(snpsall$Distance,function(x) as.integer(x)==1)
+testmaf=lapply(snpsall$MinorAlleleFrequency,function(x) as.numeric(x)>.01)
+#target=lapply(testdist & testmaf)
+llen = lapply(snpsall$Distance,length)
+cgsnps=c()
+for(i in 1:length(testdist)){
+  curdist=testdist[[i]]
+  curmaf=testmaf[[i]]
+  res= curdist & curmaf
+  if(sum(res)>=1){
+    cgsnps=c(cgsnps,rownames(snpsall)[i])
+  }
+  
+  
+}
+
+#think this is only set up for mcsea
+anc_pc <- location.based.pc(beta,cgsnps)
+#anc_df1=cbind(phenotest3[,c(1:3,5:8)],anc_pc$loadings[,2:4])
+#anc_df2=cbind(phenotest2[,c(1:3,5:8)],anc_pc$loadings[,2:4])
+
+biolrep <- phenocellrd$Individual
+corfit_old<- duplicateCorrelation(mvalsf, design=mod8,block=biolrep)
+corfit_old2<-duplicateCorrelation(mvalsf,design=mod9,block=biolrep)
+
+ fullannot <- cpg.annotate("array",mvalsf,what="M",arraytype="EPIC",analysis.type="differential",design=mod8,coef=2,correlation=corfit_old$consensus.correlation)
+ dmrcfull <- dmrcate(fullannot, lambda=1000, C=2)
+# 
+# 
+fullannot2 <- cpg.annotate("array",mvalsf,what="M",arraytype="EPIC",analysis.type="differential",design=mod9,coef=2,correlation=corfit_old2$consensus.correlation)
+ dmrcfull2 <- dmrcate(fullannot2, lambda=1000, C=2)
+
+```
+
+# get results from dmrcate
+
+DMRcate automates things less than mCSEA, but on the other hand lets you define more sophisticated models (e.g. correlations between samples). I technically coded the correlation into mCSEA, but it still can't handle things like contiuous regressors.
+Regressions continuous time on covariates is fine with DMRcate (see mod9, above)
+
+```{r dmrcextract}
+full.ranges <- extractRanges(dmrcfull, genome = "hg19")
+dmrcsv<-data.frame(full.ranges)
+dmr1<-which(abs(dmrcsv$meanbetafc)>.1)
+dmr15<-which(abs(dmrcsv$meanbetafc)>.15)
+dmr2<-which(abs(dmrcsv$meanbetafc)>.2)
+
+full.rangest<-extractRanges(dmrcfull2,genome="hg19")
+
+
+rr2<-full.ranges[dmr2]
+#rr2<-sort(rr2,meanbetafc)
+rr15<-full.ranges[dmr15]
+rr1<-full.ranges[dmr1]
+
+#how to merge the meta from
+#https://support.bioconductor.org/p/54470/
+#dmrcatecg<-subsetByOverlaps(rr1,epanol)
+#screw it, just use this package
+#devtools::install_github("frankRuehle/systemsbio", build_vignettes=TRUE)
+library(systemsbio)
+dmrcatecg<-subsetByOverlaps(epanol,rr1)
+
+hits<-findOverlaps(epanol,rr1)
+hits2<-findOverlaps(rr1,epanol)
+idx<-unique(subjectHits(hits2))
+values=mcols(rr1)
+values$dmr=1:75
+#values<-mcols(rr1)
+mcols(rr1)=values
+
+hm<-subsetByOverlaps.keepAllMeta(epanol,rr1)
+hm2=as.data.frame(hm)
+hm2$cg=rownames(hm2)
+hm2$dmr=as.numeric(hm2$dmr)
+hm2=dplyr::arrange(hm2,dmr)
+write_csv(hm2,"dmrcate_cg_dmr_overlap.csv")
+dplyr::arrange(hm2,dmr)
+
+
+nrow(dmrcsv)
+write_csv(dmrcsv,"Routput_rem0/dmr_feedresults_val_epilact_fdr05_nocut_110919.csv")
+dmro<-dmrcsv[dmr1,]
+write_csv(dmro,"Routput_rem0/dmr_feedresults_val_epilact_fdr05_betagtp1_110919.csv")
+dmro<-dmrcsv[dmr15,]
+write_csv(dmro,"Routput_rem0/dmr_feedresults_val_epilact_fdr05_betagtp15_110919.csv")
+dmro<-dmrcsv[dmr2,]
+write_csv(dmro,"Routput_rem0/dmr_feedresults_val_epilact_fdr05_betagtp2_110919.csv")
+groups <- c(Breast="magenta",Formula="forestgreen")
+cols <- groups[as.character(phenocellrd$Sample_Group)]
+samps<-phenocellrd$Individual
+
+
+
+#visualization with coMET
+#https://bioconductor.org/packages/release/bioc/html/coMET.html
+
+
+
+#dfa=map_df(prom_asc,~make_dmr(.x))
+#hm=prom_asc[[1]]
+#dfa$gname=names(prom_asc)
+GR=makeGRangesFromDataFrame(full.ranges,keep.extra.columns=T)
+GR=trim(GR)
+
+#remove old cache, run once
+library(AnnotationHub)
+#package = "AnnotationHub"
+#oldcache = path.expand(rappdirs::user_cache_dir(appname=package))
+#setAnnotationHubOption("CACHE", oldcache)
+#ah = AnnotationHub(localHub=TRUE)
+## removes old location and all resources
+#removeCache(ah, ask=FALSE)
+
+## create the new default caching location
+newcache = tools::R_user_dir(package, which="cache")
+setAnnotationHubOption("CACHE", newcache)
+ah = AnnotationHub()
+
+
+library(stringr)
+proms=na.omit(full.ranges$overlapping.promoters)
+proms2=paste(proms,collapse=',')
+proms2=str_replace_all(proms2," ","")
+proms2=unlist(strsplit(proms2,","))
+proms2_clean=str_replace_all(proms2,"-[0-9+]{3}","")
+proms2_clean<-unique(proms2_clean)
+gdf=data.frame(gene=proms2_clean)
+write_csv(gdf,"Routput_rem0/feed_genes_overlapping_proms_nocutoff_110919.csv")
+
+GR=makeGRangesFromDataFrame(full.ranges,keep.extra.columns=T)
+GR=trim(GR)
+dm2f=annotatr_wrap(GR,"Routput_rem0/dmrcate_annot_feed_val_110919.csv","Rfigures_rem0/dmrcate_annotat_feed_val_110919.pdf","Routput_rem0/dmrcate_annot_feed_overlap_val_110919.csv")
+dm2f2=data.frame(dm2f,make.names=NA)
+dm2f2=data.frame(dm2f,make.names=NA)
+dm2f2=distinct(dm2f2,annot.symbol,.keep_all=T,na.rm=T)
+rm(dm2f)
+
+GR=makeGRangesFromDataFrame(full.rangest,keep.extra.columns=T)
+GR=trim(GR)
+
+dm2t=annotatr_wrap(GR,"Routput_rem0/dmrcate_annot_time_val_110919.csv","Rfigures_rem0/dmrcate_annotat_time_val_110919.pdf","Routput_rem0/dmrcate_annot_time_overlap_val_110919.csv")
+dm2t2=data.frame(dm2t,make.names=NA)
+dm2t2=distinct(dm2t2,annot.symbol,.keep_all=T,na.rm=T)
+#rm(dm2t2)
+rm(dm2t)
+
+```
+
+# Mcsea function
+610 feed 
+376 time dmrs
+
+
+```{r mcsea}
+set.seed(42)
+#maybe need to convert to df first?
+library(dplyr)
+#try this for full data
+phenotest<-as.data.frame(phenocellrd)
+#phenotest2<-phenotest[,c(8,1,3,5,6,9,10,11,12,14,15)]
+#shouldn't have individual!, especially if its in there as biolrep
+#phenotest2<-phenotest %>% dplyr::select(Sample_Group,tpclean,Para,Race,Array,Slide,CD8T,CD4T,Bcell,Mono,Neu)
+phenotest2<-phenotest %>% dplyr::select(Sample_Group,tpclean,Para,Race,Array,Slide,Age,CD8T,CD4T,Bcell,Mono,Neu)
+#phenotest2<-phenotest %>% dplyr::select(Sample_Group,tpclean,Para,Race,Age,CD8T,CD4T,Bcell,NK,Mono)
+
+phenotest3<-phenotest %>% dplyr::select(Sample_Group,tpnum,Para,Race,Age,Array,Slide,CD8T,CD4T,Bcell,Mono,Neu)
+#drop Neu, drop next line (keep array + slide)
+#phenotest3 <- phenotest[,c(3,8,5,6,11,12,14,15)]
+#phentp<-phenotest3[,c(8,5,6,11,12,14,15)]
+phentp=phenotest3
+phentp$tstage='early'
+phentp$tstage[which(as.numeric(phenotest$tpclean)>4)]='mid'
+phentp$tstage=as.factor(phentp$tstage)
+phentp=phentp %>% dplyr::select(tstage,everything())
+phentp=phentp[,-3] #remove numeric var since its categorical tstage now
+
+biolrep <- phenocellrd$Individual
+#MEGA BIG NOTE!!!!
+#RANK PROBES2 now returns a DF instead of a vector, to get the pvals as well
+#necessary for putting into the stupid comb-p
+####
+
+#I guess I need to change the calls downstream to just get the pval
+
+
+#mrank_old <-rankProbes2(beta,phenotest2,refGroup="Formula",covariates=colnames(phenotest2)[2:11],continuous=colnames(phenotest2)[c(8,9,10,11,12)],corfit=biolrep)
+#this has slide/array #it was the indiv that was the problem
+#mrank_old <-rankProbes2(beta,phenotest2,refGroup="Formula",covariates=colnames(phenotest2)[2:10],continuous=colnames(phenotest2)[c(7,8,9,10,11)],corfit=biolrep)
+#7:12 if including array+slide
+#mrank_old <-rankProbes2(beta,phenotest2,refGroup="Formula",covariates=colnames(phenotest2)[2:10],continuous=colnames(phenotest2)[c(5:10)],corfit=biolrep)
+mrank_old <-rankProbes2(beta,phenotest2,refGroup="Formula",covariates=colnames(phenotest2)[2:12],continuous=colnames(phenotest2)[c(7:12)],corfit=biolrep)
+#ok, so need to have the cg as names above the tvalue fed into the next function
+
+mrank_v2 <-rankProbes2(beta,phentp,refGroup="mid",covariates=colnames(phentp)[2:12],continuous=colnames(phentp)[c(5,8:12)],corfit=biolrep)
+
+#make sure to figure out how to convert the df back into vector, give names
+#mrank <- rankProbes2(beta_sub,phenotest2,refGroup="mid",covariates=colnames(phenotest2)[2:8],continuous=colnames(phenotest2)[c(5,6,7,8)],corfit=biolrep)
+
+
+#mrank2 <-rankProbes2(beta_sub,phenotest3,refGroup="Formula",covariates=colnames(phenotest3)[2:8],continuous=colnames(phenotest3)[c(5,6,7,8)],corfit=biolrep)
+
+
+#mydmr<-mCSEATest(mrank_old,beta,phenotest2,regionsTypes="promoters",platform="EPIC",nproc=8)
+#if still 0, rerun with OG rankprobes2
+#mydmr_old<-mCSEATest(mrank_old,beta,phenotest2,regionsTypes="promoters",platform="EPIC",nproc=8)
+#give cg names or it won't work in future if doing the df
+tvals=mrank_old$tval
+names(tvals)=rownames(mrank_old)
+mydmr_old<-mCSEATest(tvals,beta,phenotest2,regionsTypes="promoters",platform="EPIC",nproc=8)
+saveRDS(mydmr_old,"Routput_rem0/mcsea_alldat_feed110919.RDS")
+
+#mydmr<-mCSEATest(mrank,beta,phenotest2,regionsTypes="promoters",platform="EPIC",nproc=8)
+
+#how to do it when its a df
+tvals=mrank_v2$tval
+names(tvals)=rownames(mrank_v2)
+mydmr_oldt<-mCSEATest(tvals,beta,phentp,regionsTypes="promoters",platform="EPIC",nproc=8)
+saveRDS(mydmr_oldt,"Routput_rem0/mcsea_alldat_time110919.RDS")
+
+
+
+```
+
+
+# doing the main DMR (mcsea) results
+
+mCSEA has one weird trick for better or worse where it only considers 2-factor to regress against (you can have whatever variety of categorical/continuous covariates). So, we convert the time variable into a categorical so we can predict with that (technically we could use the continuous time as a covariate, but easiest to just switch the predictor/regressor for the two models)
+
+
+I wrote a couple functions to wrap annotatr, a nice package, and make it...annonate the dmrs we have, and spit out a bunch of diagnostic figures.
+
+called annotatr_wrap()
+
+# lots of set theory and GO plotting
+
+OK, so i looked at both the union and the intersection gene lists. This was because (historically), the intersection gene list was very small... we'll see what it looks like now; when I did the wrong version we got a lot more dmrs back, so maybe removing some of the mids strengthened the comparisons?
+
+TODO...how many at the 1,1.5,2 cutoff in the dmrcate? did I even do that?
+yes..., but I'm using the full range, not any of the cutoffs
+
+take out simplify from plotting functions? it seems to significatly extend things
+
+```{r annotation,message=FALSE,warning=FALSE}
+library(readr)
+smid=phentp$tstage=="mid"
+searly=phentp$tstage=="early"
+
+sform<-phenotest2$Sample_Group=="Formula"
+sbreast<-phenotest2$Sample_Group=="Breast"
+
+#mrank3<- rankProbes2(beta)
+
+promdf<-mydmr_old[['promoters']][-7]
+promdf=promdf[promdf$padj<=.05,]
+
+promdft<-mydmr_oldt[['promoters']][-7]
+promdft=promdft[promdft$padj<=.05,]
+
+prom_asc=mydmr_old$promoters_association[names(mydmr_old$promoters_association) %in% rownames(promdf)]
+prom_asct=mydmr_oldt$promoters_association[names(mydmr_oldt$promoters_association) %in% rownames(promdft)]
+
+#make_dmr defined in functions.R
+#prettify_dmr also defined there
+
+safe_mdmr<-safely(make_dmr)
+dfa=map(prom_asc,~safe_mdmr(.x))
+#can I convert promoter asc to GR?
+outlist=list()
+dfa2=dfa[1:10]
+i=1
+for(i in 1:length(dfa)){
+  if(!is.null(dfa[i][[1]]$result)){
+    res=dfa[i][[1]]$result
+    res=cbind(res,gname=names(dfa[i]))
+    outlist[[i]]=res
+  }
+  i=i+1
+}
+
+dfa=bind_rows(outlist)
+
+dmr_feed=prettify_dmrs(prom_asc)
+dmr_time=prettify_dmrs(prom_asct)
+#hm=prom_asc[[1]]
+#dfa$gname=names(prom_asc)
+#patch this up from the list
+dmr_fgr=makeGRangesFromDataFrame(dmr_feed,keep.extra.columns=T)
+dmr_fgr=trim(dmr_fgr)
+
+dmr_tgr=makeGRangesFromDataFrame(dmr_time,keep.extra.columns=T)
+dmr_tgr=trim(dmr_tgr)
+#make_dmr(prom_asc[[1]])
+
+
+#annotatr_wrap defined in functions.R
+
+#annotatr_wrap(dmr_tgr,annot_out,overlaps_out_fig,overlaps_res)
+fgr_annot=annotatr_wrap(dmr_fgr,"Routput_rem0/mcsea_feed_annot110919.csv","Rfigures_rem0/mcsea_feed_annot_overlaps110919.pdf","mcsea_feed_overlaps110919.csv")
+fgr_annot2=as.data.frame(fgr_annot)
+fgr_annot2=distinct(fgr_annot2,annot.symbol,.keep_all=T,na.rm=T)
+tgr_annot=annotatr_wrap(dmr_tgr,"Routput_rem0/mcsea_time_annot110919.csv","Rfigures_rem0/mcsea_time_annot_overlaps110919.pdf","Routput_rem0/mcsea_time_overlaps110919.csv")
+
+tgr_annot2=as.data.frame(tgr_annot)
+tgr_annot2=distinct(tgr_annot2,annot.symbol,.keep_all=T,na.rm=T)
+saveRDS(prom_asc,"Routput_rem0/prom_origdmr110919.RDS")
+saveRDS(prom_asct,"Routput_rem0/prom_origdmt110919.RDS")
+#991
+avg1=mean(beta[prom_asc[[1]],sform])
+avg2=mean(beta[prom_asc[[1]],sbreast])
+betaavgf=sapply(1:length(prom_asc),function(x) mean(beta[prom_asc[[x]],sform])-mean(beta[prom_asc[[x]],sbreast]))
+betaavgt=sapply(1:length(prom_asct),function(x) mean(beta[prom_asct[[x]],smid])-mean(beta[prom_asct[[x]],searly]))
+
+rm(fgr_annot)
+rm(tgr_annot)
+#6610 fdmrs
+#4376 tdmrs
+```
+
+
+```{r rmdset}
+#090419
+#update to redo this overlap stuff with union not intersection
+#annotation dfs for dmrcate
+#dm2t dm2f
+gc()
+#sort( sapply(ls(),function(x){object.size(get(x))})) 
+#remove RG GR set if no longer needed and blowing up?
+rm(RGset)
+rm(GRset)
+rm(Mset)
+rm(Rset)
+rm(mydmr_oldt)
+rm(mydmr_old)
+rm(combat_beta)
+gc()
+
+#l2=subset(ll(),KB>1000) #list of objects > 1000kb
+#l2 = l2 %>% arrange(desc(KB))
+#l2$name=rownames(l2)
+#knitr::kable(l2)
+#msiz=sort( sapply(ls(),function(x){object.size(get(x))})) 
+for(obj in ls()){
+  message(obj);
+  print(object.size(get(obj)),units="auto")
+}
+```
+
+```{r}
+#remake dmrcate go figures
+a=dm_annotated$annot
+aw=which(a$type=="hg19_genes_promoters")
+dm=dm_annotated[aw]
+dm=data.frame(dm)
+dm2=dm %>% distinct(annot.symbol,.keep_all=TRUE)
+dm2= dm2 %>% arrange(desc(meanbetafc))
+```
+
+
+```{r intersectunion,message=FALSE,warning=FALSE}
+
+
+
+#outdf=cbind(gname=rownames(promdf),promdf,beta=betaavgf)
+#write_csv(outdf,"Routput_rem0/mcsea_feed_wbeta_dmr_110919.csv")
+
+mdfr=cbind(gname=rownames(promdf),promdf,beta=betaavgf)
+write_csv(mdfr,"Routput_rem0/mcsea_feed_wbeta_110919_dmr.csv")
+mdft=cbind(gname=rownames(promdft),promdft,beta=betaavgt)
+write_csv(mdft,"Routput_rem0/mcsea_tpoint_wbeta_110919_dmr.csv")
+mdfo=data.frame(overlap=intersect(mdfr$gname,mdft$gname))
+write_csv(mdfo,"Routput_rem0/mcsea_feed_tpoint_overlap110919.csv")
+nrow(mdfr)
+nrow(mdft)
+
+
+dmrcu=union(dm2t2$annot.symbol,dm2f2$annot.symbol)
+
+
+feedu=union(dm2f2$annot.symbol,mdfr$gname)
+timeu=union(dm2t2$annot.symbol,mdft$gname)
+allu=union(feedu,timeu)
+
+readr::write_lines(feedu,"Routput_rem0/dmrcate_mcsea_feed_union.txt")
+readr::write_lines(timeu,"Routput_rem0/dmrcate_mcsea_time_union.txt")
+readr::write_lines(allu,"Routput_rem0/dmrcate_mcsea_feed_time_all_union.txt")
+
+feedi=intersect(dm2f2$annot.symbol,mdfr$gname)
+mdfrs=mdfr[mdfr$gname %in% feedi,]
+fchangef=mdfrs$NES
+names(fchangef)=mdfrs$gname
+timei=intersect(dm2t2$annot.symbol,mdft$gname)
+mdfts=mdft[mdft$gname %in% timei,]
+fchanget=mdfts$NES
+names(fchanget)=mdfts$gname
+alli=intersect(feedi,timei)
+fchangea=mdft$NES[mdft$gname %in% alli]
+names(fchangea)=mdft$gname[mdft$gname %in% alli]
+
+readr::write_lines(feedi,"Routput_rem0/dmrcate_mcsea_feed_intersect.txt")
+readr::write_lines(timei,"Routput_rem0/dmrcate_mcsea_time_intersect.txt")
+readr::write_lines(alli,"Routput_rem0/dmrcate_mcsea_feed_time_all_intersect.txt")
+
+
+
+```
+
+```{r plotoverlap,message=FALSE,warning=FALSE}
+allbar(feedu,"Rfigures_rem0/mcsea_dmrcate_feed_union_barplot_1109")
+allbar(timeu,"Rfigures_rem0/mcsea_dmrcate_time_union_barplot_1109")
+allbar(allu,"Rfigures_rem0/mcsea_dmrcate_union_barplot_1109")
+massbar(feedu,"Rfigures_rem0/feed_union_barplot_1109")
+massbar(timeu,"Rfigures_rem0/time_union_barplot_1109")
+massbar(allu,"Rfigures_rem0/mcsea_dmrcate_union_barplot_1109")
+
+massbar(feedi,"Rfigures_rem0/feed_intersect_barplot_1109")
+massbar(timei,"Rfigures_rem0/time_intersect_barplot_1109")
+massbar(alli,"Rfigures_rem0/mcsea_dmrcate_intersect_barplot_1109")
+
+allbar(feedi,"Rfigures_rem0/mcsea_dmrcate_feed_intersect_barplot_1109")
+allbar(timei,"Rfigures_rem0/mcsea_dmrcate_time_intersect_barplot_1109")
+allbar(alli,"Rfigures_rem0/mcsea_dmrcate_intersect_feed_time_barplot_1109")
+
+masscnet(feedi,fchangef,"Rfigures_rem0/feed_intersect_cnetplot_1109")
+masscnet(timei,fchanget,"Rfigures_rem0/time_intersect_cnetplot_1109")
+masscnet(alli,fchangea,"Rfigures_rem0/mcsea_dmrcate_intersect_cnetplot_1109")
+allcnet(feedi,fchangef,"Rfigures_rem0/mcsea_dmrcate_feed_intersect_cnetplot_1109")
+allcnet(timei,fchanget,"Rfigures_rem0/mcsea_dmrcate_time_intersect_cnetplot_1109")
+allcnet(alli,fchangea,"Rfigures_rem0/mcsea_dmrcate_feed_time_intersect_cnetplot_1109")
+
+#all cnet doesn't produce in rem0?
+
+mdfu=union(mdfr$gname,mdft$gname)
+tunion=union(dmrcu,mdfu)
+
+readr::write_lines(mdfu,"Routput_rem0/mcsea_feed_union.txt")
+readr::write_lines(tunion,"Routput_rem0/mcsea_time_union.txt")
+
+library(clusterProfiler)
+ego=enrichGO(dmrcu,OrgDb=org.Hs.eg.db,keyType="SYMBOL")
+
+ego2=enrichGO(mdfu,OrgDb=org.Hs.eg.db,keyType="SYMBOL")
+ego3=enrichGO(tunion,OrgDb=org.Hs.eg.db,keyType="SYMBOL")
+library(enrichplot)
+p=barplot(ego)
+ggsave("Rfigures_rem0/dmrcate_union_mf110919.png",width=10,height=10)
+p=barplot(ego2)
+ggsave("Rfigures_rem0/mcsea_union_mf110919.png",width=10,height=10)
+p=barplot(ego)
+ggsave("Rfigures_rem0/dmrcate_mcsea_union_mf110919.png",width=10,height=10)
+
+ego=enrichGO(dmrcu,OrgDb=org.Hs.eg.db,keyType="SYMBOL",ont="ALL")
+
+ego2=enrichGO(mdfu,OrgDb=org.Hs.eg.db,keyType="SYMBOL",ont="ALL")
+ego3=enrichGO(tunion,OrgDb=org.Hs.eg.db,keyType="SYMBOL",ont="ALL")
+
+p=barplot(ego)
+ggsave("Rfigures_rem0/dmrcate_union_bp110919.png",width=10,height=10)
+p=barplot(ego2)
+ggsave("Rfigures_rem0/mcsea_union_bp110919.png",width=10,height=10)
+p=barplot(ego)
+ggsave("Rfigures_rem0/dmrcate_mcsea_union_bp110919.png",width=10,height=10)
+
+
+# ego=enrichGO(dmrcu,OrgDb=org.Hs.eg.db,keyType="SYMBOL",ont="CC")
+# 
+# ego2=enrichGO(mdfu,OrgDb=org.Hs.eg.db,keyType="SYMBOL",ont="CC")
+# ego3=enrichGO(tunion,OrgDb=org.Hs.eg.db,keyType="SYMBOL",ont="CC")
+# library(enrichplot)
+# p=barplot(ego)
+# ggsave("dmrcate_union_cc_110919.png",width=10,height=10)
+# p=barplot(ego2)
+# ggsave("mcsea_union_cc_110919.png",width=10,height=10)
+# p=barplot(ego)
+# ggsave("dmrcate_mcsea_union_cc_110919.png",width=10,height=10)
+# 
+# 
+# dmrcu=c(dmrcu,rep(NA,length(tunion)-length(dmrcu)))
+# mdfu=c(mdfu,rep(NA,length(tunion)-length(mdfu)))
+# outun=data.frame(dmrcate_un=dmrcu,mcsea_un=mdfu,all_un=tunion)
+# write_csv(outun,"dmr_mcsea_union110919.csv")
+
+
+
+#smid searly
+
+
+glist=mdfr$gname
+gse=enrichGO(glist,"org.Hs.eg.db",ont="BP",keyType="SYMBOL")
+#gse2=clusterProfiler::simplify(gse)
+gsedf=as.data.frame(gse)
+write_csv(gsedf,"Routput_rem0/gse_mcsea_bp_feed_110919.csv")
+p=barplot(gse)+theme(legend.position="bottom")
+ggsave("Rfigures_rem0/barplot_mcsea_all_feed_110919.pdf",width=10,height=10)
+
+
+fchange=mdfr$NES
+names(fchange)=mdfr$gname
+p2=cnetplot(gse,foldChange=fchange) #how the 
+ggsave("Rfigures_rem0/cnet_mcsea_bp_feed_bp110919.png",width=10,height=10)
+
+p=heatplot(gse,foldChange=fchange)
+ggsave("Rfigures_rem0/heatplot_mcsea_bp_feed_bp110919.png",width=30,height=15)
+p=
+nrow(mdfo)
+
+glist=mdfo$overlap
+gse=enrichGO(glist,"org.Hs.eg.db",ont="ALL",keyType="SYMBOL",pool=TRUE)
+#these calls really add a lot of time, better to do it with the
+#gse2=clusterProfiler::simplify(gse)
+gsedf=as.data.frame(gse)
+write_csv(gsedf,"Routput_rem0/gse_mcsea_all_time_110919.csv")
+p=barplot(gse)+theme(legend.position="bottom")
+ggsave("Rfigures_rem0/barplot_mcsea_all_time_110919.png",width=10,height=10)
+
+fchange=mdft$NES
+names(fchange)=mdft$gname
+p2=cnetplot(gse,foldChange=fchange) #how the 
+ggsave("Rfigures_rem0/cnet_mcsea_time_110919.png",width=10,height=10)
+
+p=heatplot(gse,foldChange=fchange)
+ggsave("Rfigures_rem0/heatplot_mcsea_time_bp110919.png",width=30,height=15)
+
+p=emapplot(gse)
+ggsave("Rfigures_rem0/emap_mcsea_time_bp110919.png",width=10,height=10)
+
+
+glist=mdft$gname
+gse=enrichGO(glist,"org.Hs.eg.db",ont="ALL",keyType="SYMBOL",pool=TRUE)
+#gse2=clusterProfiler::simplify(gse)
+gsedf=as.data.frame(gse)
+write_csv(gsedf,"Routput_rem0/gse_mcsea_all_time_110919.csv")
+p=barplot(gse)+theme(legend.position="bottom")
+ggsave("Rfigures_rem0/barplot_mcsea_all_time_110919.png",width=10,height=10)
+
+fchange=mdft$NES
+names(fchange)=mdft$gname
+p2=cnetplot(gse,foldChange=fchange) #how the 
+ggsave("Rfigures_rem0/cnet_mcsea_all_time_bp110919.png",width=10,height=10)
+
+p=heatplot(gse,foldChange=fchange)
+ggsave("Rfigures_rem0/heatplot_mcsea_all_time_bp110919.png",width=30,height=15)
+
+p=emapplot(gse)
+ggsave("Rfigures_rem0/emap_mcsea_all_time_110919.png",width=10,height=10)
+
+#ancestral snps part
+
+testdist=lapply(snpsall$Distance,function(x) as.integer(x)==1)
+testmaf=lapply(snpsall$MinorAlleleFrequency,function(x) as.numeric(x)>.01)
+#target=lapply(testdist & testmaf)
+llen = lapply(snpsall$Distance,length)
+cgsnps=c()
+for(i in 1:length(testdist)){
+  curdist=testdist[[i]]
+  curmaf=testmaf[[i]]
+  res= curdist & curmaf
+  if(sum(res)>=1){
+    cgsnps=c(cgsnps,rownames(snpsall)[i])
+  }
+
+
+}
+
+#sum(cgsnps in rownames(beta)) #9305/10199 probes there, maybe should do imputation? .... dunno
+
+#modified from
+# http://genetics.emory.edu/research/conneely/annotation-r-code.html
+#PCA_code.zip
+#location.based.pc.R
+location.based.pc<-function(beta.obj,annocpgs){
+
+  beta.obj<-as.matrix(beta.obj)
+  beta.obj<-beta.obj[which(rownames(beta.obj) %in% annocpgs),]
+  theresult<-princomp(x=beta.obj,cor=T)
+  gc()
+  return(theresult)
+}
+
+anc_pc <- location.based.pc(beta,cgsnps)
+#install.packages("factoextra")
+#read this book
+#https://www.datanovia.com/en/wp-content/uploads/dn-tutorials/book-preview/clustering_en_preview.pdf
+library(factoextra)
+
+anc_df1=cbind(phenotest3[,c(1:3,5:8)],anc_pc$loadings[,2:4])
+anc_df2=cbind(phenotest2[,c(1:3,5:8)],anc_pc$loadings[,2:4])
+
+anc_res2 <- rankProbes2(beta_sub,anc_df2,refGroup="mid",covariates=colnames(anc_df2)[2:10],continuous=colnames(anc_df2)[c(4,5,6,7,8,9,10)],corfit=biolrep)
+
+
+
+anc_res <-rankProbes2(beta_sub,anc_df1,refGroup="Formula",covariates=colnames(anc_df1)[2:10],continuous=colnames(anc_df1)[c(4,5,6,7,8,9,10)],corfit=biolrep)
+
+
+anc_dmr2<-mCSEATest(anc_res2,beta_sub,anc_df2,regionsTypes="promoters",platform="EPIC",nproc=8)
+
+anc_dmr <- mCSEATest(anc_res,beta_sub,anc_df1,regionsTypes="promoters",platform="EPIC",nproc=8)
+
+ancprom<-anc_dmr[['promoters']][-7]
+ancprom2<-anc_dmr2[['promoters']][-7]
+ancprom=ancprom[ancprom$padj<=.05,]
+ancprom2=ancprom2[ancprom2$padj<=.05,]
+ancpac=anc_dmr$promoters_association[names(anc_dmr$promoters_association) %in% rownames(ancprom)]
+ancpac2=anc_dmr2$promoters_association[names(anc_dmr2$promoters_association) %in% rownames(ancprom2)]
+
+betaanc1=sapply(1:length(ancpac),function(x) mean(beta_sub[ancpac[[x]],sform])-mean(beta_sub[ancpac[[x]],sbreast]))
+
+betaanc2=sapply(1:length(ancpac2),function(x) mean(beta_sub[ancpac2[[x]],sform])-mean(beta_sub[ancpac2[[x]],sbreast]))
+
+outdf_anc=cbind(gname=rownames(ancprom),ancprom,beta=betaanc1)
+write_csv(outdf_anc,"Routput_rem0/mcsea_feed_dmr_anc_110919.csv")
+outdf2_anc=cbind(gname=rownames(ancprom2),ancprom2,beta=betaanc2)
+write_csv(outdf2_anc,"Routput_rem0/mcsea_tpoint_dmr_anc_110919.csv")
+outdf3_anc=data.frame(overlap=intersect(outdf$gname,outdf2$gname))
+write_csv(outdf3_anc,"Routput_rem0/mcsea_feed_tpoint_overlap_anc_110919.csv")
+
+cons_dmr=data.frame(cons_dmr=intersect(outdf3$overlap,outdf3_anc$overlap))
+
+library(clusterProfiler)
+
+ cons_go=enrichGO(cons_dmr$cons_dmr,
+                  OrgDb=org.Hs.eg.db,
+                  keyType="SYMBOL",
+                  ont="BP")
+
+ cons_go=enrichGO(df$gname,
+                  OrgDb=org.Hs.eg.db,
+                  keyType="SYMBOL",
+                  ont="BP")
+
+ cons_go2=simplify(cons_go)
+ p=emapplot(cons_go2)
+ ggsave("network_overlapdmrs_110919.png",p)
+
+
+
+
+ betaplot=outdf[outdf$gname %in% outdf3$overlap,]
+ betaplot = betaplot %>% arrange(desc(abs(beta)))
+ write_csv(betaplot,"Routput_rem0/consdmr_rankbeta_110919.csv")
+
+ p1=qplot(abs(outdf$beta))+labs(title="feed dmr, race cat",x="Beta")
+ p2=qplot(abs(outdf2$beta))+labs(title="tpoint dmr, race cat",x="Beta")
+ p3=qplot(abs(outdf_anc$beta))+labs(title="feed dmr, race pca",x="Beta")
+ p4=qplot(abs(outdf2_anc$beta))+labs(title="tpoint dmr, race pca",x="Beta")
+
+
+ library(cowplot)
+ p=plot_grid(p1,p2,p3,p4,labels=c("A","B","C","D"))
+ save_plot("beta_dist.png",p,ncol=2,nrow=2)
+
+
+
+ promdf2<-mydmr2[['promoters']][-7]
+ promdf2=promdf2[promdf2$padj<=.05,]
+ prom_asc2=mydmr2$promoters_association[names(mydmr2$promoters_association) %in% rownames(promdf2)]
+
+
+ betaavg2=sapply(1:length(prom_asc2),function(x) mean(beta_sub[prom_asc2[[x]],sform])-mean(beta_sub[prom_asc2[[x]],sbreast]))
+
+
+```
+
+# overlap with prev results
+compare the new vs the technically old results (well, with t0 removed)
+```{r prevover}
+#pov=readr::read_lines("dmrcate_mcsea_feed_time_intersect072319")
+#pov=pov[2:length(pov)]
+
+#mc_dmr_feed=read_csv("mcsea_dmrcate_feed_intersect072319.csv")
+
+
+feedic=readr::read_lines("Routput_rem0/dmrcate_feed_intersect.txt")
+timeic=readr::read_lines("Routput_rem0/dmrcate_time_intersect.txt")
+allic=readr::read_lines("Routput_rem0/dmrcate_all_intersect.txt")
+
+intersect(alli,allic)
+
+hm=intersect(mc_dmr_feed$symbol,feedic)
+hm2=mdfr[mdfr$gname %in% hm,]
+readr::write_lines(hm,"Routput_rem0/overlap_old_new_dset_feed111919.txt")
+write_csv(hm2,"Routput_rem0/overlap_old_new_feed_mcseanes111919.csv")
+
+#theend
+save.image("Routput_rem0/everything_removed0val.RData")
+
+```
