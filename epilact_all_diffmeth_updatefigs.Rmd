@@ -51,14 +51,12 @@ toremove<-xlsx::read.xlsx('Rinput/EPILACT_de-identified_database_11-24_exclude_s
 
 
 
-#from email, exlude visits from 5-7 (Visit Used)
-#leaving in to laugh at myself
+#from email, exclude visits from 5-7 (Visit Used)
+
 
 targetstm= targets %>% filter(!(tpclean %in% c(0)))
 targetstm2=targetstm
-#what's a better way?
-#all I can think is to exhaustively loop through,
-# %in% won't work, right?
+
 nrow(targets)
 RGset <- read.metharray.exp(targets = targetstm2)
 
@@ -92,7 +90,6 @@ cellCounts <- estimateCellCounts2(RGset)
 
 # more interesting stuff
 
-why do we do this?
 
 continue from early parts
 
@@ -122,7 +119,7 @@ mod<-model.matrix(~as.factor(Sample_Group)+as.factor(tpclean),data=phenocellrd)
 #combat_beta<-ComBat(dat=mval,batch=phenocellrd$Array, mod=mod) 
 modcombat1<-model.matrix(~Sample_Group, data=phenocellrd)
 combat_beta<-ComBat(dat=mval,batch=phenocellrd$Slide,mod=modcombat1)
-#combat_mval=combat_beta #wasn't actually beta before
+#combat_mval=combat_beta 
 
 #epanor=getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
 #epanor=getLocations(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
@@ -227,10 +224,7 @@ rr2<-full.ranges[dmr2]
 rr15<-full.ranges[dmr15]
 rr1<-full.ranges[dmr1]
 
-#how to merge the meta from
-#https://support.bioconductor.org/p/54470/
-#dmrcatecg<-subsetByOverlaps(rr1,epanol)
-#screw it, just use this package
+
 #devtools::install_github("frankRuehle/systemsbio", build_vignettes=TRUE)
 library(systemsbio)
 dmrcatecg<-subsetByOverlaps(epanol,rr1)
@@ -408,12 +402,10 @@ called annotatr_wrap()
 
 # lots of set theory and GO plotting
 
-OK, so i looked at both the union and the intersection gene lists. This was because (historically), the intersection gene list was very small... we'll see what it looks like now; when I did the wrong version we got a lot more dmrs back, so maybe removing some of the mids strengthened the comparisons?
 
-TODO...how many at the 1,1.5,2 cutoff in the dmrcate? did I even do that?
-yes..., but I'm using the full range, not any of the cutoffs
 
-take out simplify from plotting functions? it seems to significatly extend things
+
+
 
 ```{r annotation,message=FALSE,warning=FALSE}
 library(readr)
@@ -602,7 +594,6 @@ allcnet(feedi,fchangef,"Rfigures_rem0/mcsea_dmrcate_feed_intersect_cnetplot_1109
 allcnet(timei,fchanget,"Rfigures_rem0/mcsea_dmrcate_time_intersect_cnetplot_1109")
 allcnet(alli,fchangea,"Rfigures_rem0/mcsea_dmrcate_feed_time_intersect_cnetplot_1109")
 
-#all cnet doesn't produce in rem0?
 
 mdfu=union(mdfr$gname,mdft$gname)
 tunion=union(dmrcu,mdfu)
@@ -736,7 +727,7 @@ for(i in 1:length(testdist)){
 
 }
 
-#sum(cgsnps in rownames(beta)) #9305/10199 probes there, maybe should do imputation? .... dunno
+
 
 #modified from
 # http://genetics.emory.edu/research/conneely/annotation-r-code.html
